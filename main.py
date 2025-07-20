@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, html
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode, ChatMemberStatus
+from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 from dotenv import load_dotenv
@@ -20,8 +20,13 @@ bot = Bot(token=os.environ['BOT_TOKEN'], default=DefaultBotProperties(parse_mode
 
 totp = TOTP(os.environ['OTP_SECRET'])
 CHAT_ID = int(os.environ['CHAT_ID'])
+ADMIN_ID = int(os.environ['ADMIN_ID'])
 
 storage = Storage()
+
+if not storage.has("allowed_user_ids"):
+    storage.set("allowed_user_ids", [])
+
 
 @dp.message(CommandStart())
 async def start(message: Message):
@@ -50,65 +55,36 @@ def get_code_and_time():
     return code, time_remaining
 
 
+def confirm_user(user_id: int):
+    allowed_users: list = storage.get("allowed_user_ids")
+    if user_id not in allowed_users:
+        allowed_users.append(user_id)
+        storage.set("allowed_user_ids", allowed_users)
+
+
 @dp.message(Command("otp"))
 async def otp(message: Message):
-    if message.chat.id != CHAT_ID:
+    allowed_users: list = storage.get("allowed_user_ids")
+
+    if message.from_user.username:
+        user = f"<a href='https://t.me/{message.from_user.username}'>{message.from_user.full_name}</a>"
+    else:
+        user = message.from_user.full_name
+
+    if message.chat.id != CHAT_ID and message.from_user.id not in allowed_users:
+        await bot.send_message(ADMIN_ID, f"❌ {user} запросил код, но получил отказ", disable_web_page_preview=True)
         return
+
+    confirm_user(message.from_user.id)
+
     code, time_remaining = get_code_and_time()
     await message.answer(f"{html.code(code)}\n\nДействует ещё {html.bold(time_remaining)} {pluralize_seconds(time_remaining)}")
+    await bot.send_message(ADMIN_ID, f"🧑‍💻 {user} запросил код", disable_web_page_preview=True)
 
 
-def render_login_template(url: str, login: str, password: str, otp_code: str, otp_time) -> str:
-    minutes = otp_time // 60
-    secs = otp_time % 60
-    ms_format = f"{minutes:02}:{secs:02}"
-    return (
-        f"🔐 <b>Данные для входа</b>\n\n"
-        f"🌐 Сайт: <a href=\"{html.quote(url)}\">{html.quote(url)}</a>\n"
-        f"👤 Логин: {html.code(html.quote(login))}\n"
-        f"🔑 Пароль: {html.code(html.quote(password))}\n"
-        f"📲 OTP-код: {html.code(html.quote(otp_code))} ({html.bold(ms_format)})\n\n"
-    )
-
-
-async def update_pinned_message():
-    global storage
-
-    pinned_messages = storage.get("pinned_messages", {})
-    pinned_message_id = pinned_messages.get(str(CHAT_ID), -1)
-
-    while True:
-        code, time_remaining = get_code_and_time()
-
-        message_text = render_login_template(os.environ['URL'], os.environ['LOGIN'], os.environ['PASSWORD'], code, time_remaining)
-
-        if pinned_message_id > 0:
-            try:
-                await bot.edit_message_text(
-                    chat_id=CHAT_ID,
-                    message_id=pinned_message_id,
-                    text=message_text,
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception as e:
-                logging.error(f"Failed to edit pinned message: {e}")
-                pinned_message_id = -1
-        else:
-            try:
-                new_message = await bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=message_text,
-                    parse_mode=ParseMode.HTML
-                )
-                await bot.pin_chat_message(chat_id=CHAT_ID, message_id=new_message.message_id, disable_notification=True)
-
-                pinned_message_id = new_message.message_id
-                pinned_messages[str(CHAT_ID)] = pinned_message_id
-                storage.set("pinned_messages", pinned_messages)
-            except Exception as e:
-                logging.error(f"Failed to send message: {e}")
-
-        await asyncio.sleep(3)
+@dp.message(lambda msg: msg.chat.id == CHAT_ID)
+async def update_conversation(message: Message):
+    confirm_user(message.from_user.id)
 
 
 async def main() -> None:
@@ -116,13 +92,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-
-
-    async def run_all():
-        await asyncio.gather(
-            main(),
-            update_pinned_message()
-        )
-
-
-    asyncio.run(run_all())
+    asyncio.run(main())
